@@ -233,13 +233,14 @@ def my_app(cfg: DictConfig) -> None:
         check_val_every_n_epoch=10,
     )
 
-    trainer.validate(evaluator, val_loader, ckpt_path="runs/probes/seg-probe/lightning_logs/version_0/checkpoints/epoch=99-step=38200.ckpt")
+    validate = True
+    if validate:
+        trainer.validate(evaluator, val_loader, ckpt_path="runs/probes/seg-probe/lightning_logs/version_0/checkpoints/epoch=99-step=38200.ckpt")
+    else:
+        trainer.fit(evaluator, train_loader, val_loader)
+
+        trainer.save_checkpoint(chkpt_dir)
     results = compute_result(evaluator)
-    exit()
-
-    trainer.fit(evaluator, train_loader, val_loader)
-
-    trainer.save_checkpoint(chkpt_dir)
 
 
 if __name__ == "__main__":
