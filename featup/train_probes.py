@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning import seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.utilities.seed import seed_everything
+# from pytorch_lightning.utilities.seed import seed_everything
 from torch.utils.data import DataLoader
 from torchmetrics.classification import Accuracy, JaccardIndex
 
@@ -61,6 +61,7 @@ class LitPrototypeEvaluator(pl.LightningModule):
         self.linear_iou_metric = JaccardIndex(num_classes=n_classes, task="multiclass")
         self.linear_iou_buff = self.register_buffer("linear_iou", torch.tensor(0.0))
 
+        self.n_classes = n_classes  
         self.ce = torch.nn.CrossEntropyLoss()
 
     def get_prototypes(self, feats):
@@ -117,7 +118,7 @@ class LitPrototypeEvaluator(pl.LightningModule):
             colorize = Coco.colorize_label if self.task == 'seg' else lambda x: x.detach().cpu()
             for i in range(n_images):
                 feats_pca = pca([feats])[0][0][i]
-                axes[0, i].imshow(feats_pca)
+                axes[0, i].imshow(feats_pca.permute(1,2,0).cpu())
                 axes[1, i].imshow(colorize(label[i]))
                 if self.task == 'depth':
                     axes[2, i].imshow(colorize(linear_preds[i][0]))
@@ -139,25 +140,29 @@ class LitPrototypeEvaluator(pl.LightningModule):
             if self.task == 'seg':
                 label = F.interpolate(
                     label.to(torch.float32).unsqueeze(1), size=(224, 224)).to(torch.int64).squeeze(1)
+                b, h, w = label.shape
 
+                # # we can upsample here if we want, this is commented/uncommented for each run I need to do (sorry)
+                # feats = F.interpolate(feats, (h, w), mode='bilinear')
+
+                # we added the nearest interpolation below, as it wasn't present
                 prot_preds = torch.einsum(
                     "bchw,kc->bkhw",
                     F.normalize(feats, dim=1),
                     F.normalize(self.prototypes, dim=1, eps=1e-10)).argmax(1, keepdim=True)
                 linear_preds = self.classifier(feats).argmax(1, keepdim=True)
 
-                b, h, w = label.shape
                 flat_labels = label.flatten()
                 selected = flat_labels > -1
                 flat_labels = flat_labels[selected]
 
                 flat_prot_preds = F.interpolate(
-                    prot_preds.to(torch.float32), (h, w)).to(torch.int64).flatten()[selected]
+                    prot_preds.to(torch.float32), (h, w), mode='nearest').to(torch.int64).flatten()[selected]
                 self.prot_acc_metric.update(flat_prot_preds, flat_labels)
                 self.prot_iou_metric.update(flat_prot_preds, flat_labels)
 
                 flat_linear_preds = F.interpolate(
-                    linear_preds.to(torch.float32), (h, w)).to(torch.int64).flatten()[selected]
+                    linear_preds.to(torch.float32), (h, w), mode='nearest').to(torch.int64).flatten()[selected]
                 self.linear_acc_metric.update(flat_linear_preds, flat_labels)
                 self.linear_iou_metric.update(flat_linear_preds, flat_labels)
 
@@ -176,7 +181,7 @@ class LitPrototypeEvaluator(pl.LightningModule):
 
         return None
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         self.prot_acc = self.prot_acc_metric.compute()
         self.prot_iou = self.prot_iou_metric.compute()
         self.linear_acc = self.linear_acc_metric.compute()
@@ -185,6 +190,17 @@ class LitPrototypeEvaluator(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.classifier.parameters(), lr=5e-3)
 
+def compute_result(evaluator):
+    result = {
+        "Prototype Accuracy": float(evaluator.prot_acc),
+        "Prototype mIoU": float(evaluator.prot_iou),
+        "Linear Accuracy": float(evaluator.linear_acc),
+        "Linear mIoU": float(evaluator.linear_iou),
+    }
+    print(result)
+    return result
+
+
 
 @hydra.main(config_path="configs", config_name="train_probe.yaml")
 def my_app(cfg: DictConfig) -> None:
@@ -192,16 +208,17 @@ def my_app(cfg: DictConfig) -> None:
     print(cfg.output_root)
     seed_everything(seed=0, workers=True)
 
-    log_dir = f"../probes/{cfg.task}-probe"
-    chkpt_dir = f"../probes/{cfg.task}-probe-{cfg.model_type}.ckpt"
+    log_dir = f"runs/probes/{cfg.task}-probe"
+    chkpt_dir = f"runs/probes/{cfg.task}-probe-{cfg.model_type}.ckpt"
 
-    emb_root = join(cfg.pytorch_data_dir, "cocostuff", "embedding", cfg.model_type)
+    # emb_root = join(cfg.pytorch_data_dir, "cocostuff", "embedding", cfg.model_type)
+    emb_root = "/export/home/data/featupdata/featup_embeddings"
 
-    train_dataset = EmbeddingFile(join(emb_root, "train", f"embeddings_{cfg.activation_type}.npz"))
+    train_dataset = EmbeddingFile(join(emb_root, "embeddings.npz"))
     train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
 
-    val_dataset = EmbeddingFile(join(emb_root, "val", f"embeddings_{cfg.activation_type}.npz"))
-    val_loader = DataLoader(val_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
+    val_dataset = EmbeddingFile(join(emb_root, f"embeddings_val.npz"))
+    val_loader = DataLoader(val_dataset, cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
 
     evaluator = LitPrototypeEvaluator(cfg.task, train_dataset.dim())
     tb_logger = TensorBoardLogger(log_dir, default_hp_metric=False)
@@ -216,18 +233,13 @@ def my_app(cfg: DictConfig) -> None:
         check_val_every_n_epoch=10,
     )
 
+    trainer.validate(evaluator, val_loader, ckpt_path="runs/probes/seg-probe/lightning_logs/version_0/checkpoints/epoch=99-step=38200.ckpt")
+    results = compute_result(evaluator)
+    exit()
+
     trainer.fit(evaluator, train_loader, val_loader)
 
     trainer.save_checkpoint(chkpt_dir)
-
-    result = {
-        "Prototype Accuracy": float(evaluator.prot_acc),
-        "Prototype mIoU": float(evaluator.prot_iou),
-        "Linear Accuracy": float(evaluator.linear_acc),
-        "Linear mIoU": float(evaluator.linear_iou),
-        "Model": cfg.model_type
-    }
-    print(result)
 
 
 if __name__ == "__main__":
