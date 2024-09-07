@@ -32,7 +32,6 @@ def generate_embeddings(dstdir, do_val=False):
     # ds2 = Coco('/export/home/data/featupdata/', 'train', transform=img_transform, target_transform=label_transform2, include_labels=True)
     mean = torch.Tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.Tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-    i = 0
     results = {"feats": np.empty((len(ds), 384, 16, 16), dtype=np.float32), "labels": np.empty((len(ds), 16, 16), dtype=np.int32)}
     
     for batch_ind, batch in tqdm.tqdm(enumerate(dl)):
@@ -49,8 +48,8 @@ def generate_embeddings(dstdir, do_val=False):
         Ph, Pw = H // P, W // P
         B, PhPw, F = feats.shape
         feats = feats.reshape(B, Ph, Pw, F).permute(0, 3, 1, 2).cpu().numpy()
-        results["feats"][i:i+B] = feats
-        results["labels"][i:i+B] = label.numpy()
+        results["feats"][batch_ind:batch_ind+B] = feats
+        results["labels"][batch_ind:batch_ind+B] = label.numpy()
 
         # Image.fromarray((minmaxnorm(feats[:3])*255).astype('uint8').transpose(1, 2, 0)).save('ifeats.png')
         # i += 1
@@ -62,4 +61,4 @@ def generate_embeddings(dstdir, do_val=False):
 
 
 if __name__ == '__main__':
-    generate_embeddings('/export/home/data/featupdata/featup_embeddings', do_val=True)
+    generate_embeddings('/export/home/data/featupdata/featup_embeddings', do_val=False)
