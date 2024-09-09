@@ -23,9 +23,9 @@ filter_ent_weight: 0.0
 tv_weight: 0.0
 
 # Training args
-batch_size: 2
+batch_size: 256
 epochs: 200
-num_workers: 24
+num_workers: 96
 lr: 1e-3
 dropout: .5
 wd: 0.0
