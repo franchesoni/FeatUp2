@@ -14,11 +14,13 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from torchmetrics.classification import Accuracy, JaccardIndex
 
+from PIL import Image
+import torchvision.transforms.v2 as T
+
 from featup.datasets.COCO import Coco
-from featup.datasets.EmbeddingFile import EmbeddingFile
+from featup.datasets.EmbeddingFile import EmbeddingFile, EmbeddingAndImage
 from featup.losses import ScaleAndShiftInvariantLoss
-from featup.util import pca
-from featup.util import remove_axes
+from featup.util import pca, remove_axes, norm
 
 
 def tensor_correlation(a, b):
@@ -63,6 +65,9 @@ class LitPrototypeEvaluator(pl.LightningModule):
 
         self.n_classes = n_classes  
         self.ce = torch.nn.CrossEntropyLoss()
+
+        # set attribute like this to avoid buffer registration
+        object.__setattr__(self, 'featup', torch.hub.load('mhamilton723/FeatUp', 'dinov2', use_norm=False))
 
     def get_prototypes(self, feats):
         b, c, h, w = feats.shape
@@ -135,15 +140,21 @@ class LitPrototypeEvaluator(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         with torch.no_grad():
-            feats, label = batch
+            feats, label, img = batch
 
             if self.task == 'seg':
                 label = F.interpolate(
                     label.to(torch.float32).unsqueeze(1), size=(224, 224)).to(torch.int64).squeeze(1)
                 b, h, w = label.shape
 
-                # # we can upsample here if we want, this is commented/uncommented for each run I need to do (sorry)
-                # feats = F.interpolate(feats, (h, w), mode='bilinear')
+                # we can upsample here if we want, this is commented/uncommented for each run I need to do (sorry)
+                if UPSAMPLER_TYPE == "none":
+                    pass
+                elif UPSAMPLER_TYPE == "bilinear":
+                    feats = F.interpolate(feats, (h, w), mode='bilinear')
+                elif UPSAMPLER_TYPE == "featup":
+                    self.featup = self.featup.to(feats.device)
+                    feats = self.featup.upsampler(feats, norm(img))
 
                 # we added the nearest interpolation below, as it wasn't present
                 prot_preds = torch.einsum(
@@ -186,6 +197,8 @@ class LitPrototypeEvaluator(pl.LightningModule):
         self.prot_iou = self.prot_iou_metric.compute()
         self.linear_acc = self.linear_acc_metric.compute()
         self.linear_iou = self.linear_iou_metric.compute()
+        compute_result(self)
+        
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.classifier.parameters(), lr=5e-3)
@@ -200,7 +213,8 @@ def compute_result(evaluator):
     print(result)
     return result
 
-
+validate = True
+UPSAMPLER_TYPE = "featup"
 
 @hydra.main(config_path="configs", config_name="train_probe.yaml")
 def my_app(cfg: DictConfig) -> None:
@@ -214,10 +228,23 @@ def my_app(cfg: DictConfig) -> None:
     # emb_root = join(cfg.pytorch_data_dir, "cocostuff", "embedding", cfg.model_type)
     emb_root = "/export/home/data/featupdata/featup_embeddings"
 
+    if validate and (not UPSAMPLER_TYPE in ['none', 'bilinear']):  # reduce batch size to avoid memory overflow
+        cfg.batch_size = 8
+
+
+    # resize to 224 transform
+    img_transform = torch.nn.Sequential(
+        T.Resize((224, 224)),
+        T.ToImage(),
+        T.ToDtype(torch.float32, scale=True),
+    )
+    label_transform = torch.nn.Sequential(T.ToImage(), T.ToDtype(torch.int), T.Resize((16, 16), interpolation=Image.NEAREST))
+    coco_val_ds = Coco('/export/home/data/featupdata/', 'val', transform=img_transform, target_transform=label_transform, include_labels=True)
+
     train_dataset = EmbeddingFile(join(emb_root, "embeddings.npz"))
     train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
 
-    val_dataset = EmbeddingFile(join(emb_root, f"embeddings_val.npz"))
+    val_dataset = EmbeddingAndImage(join(emb_root, f"embeddings_val.npz"), coco_val_ds)
     val_loader = DataLoader(val_dataset, cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
 
     evaluator = LitPrototypeEvaluator(cfg.task, train_dataset.dim())
@@ -233,9 +260,9 @@ def my_app(cfg: DictConfig) -> None:
         check_val_every_n_epoch=10,
     )
 
-    validate = True
     if validate:
-        trainer.validate(evaluator, val_loader, ckpt_path="runs/probes/seg-probe/lightning_logs/version_0/checkpoints/epoch=99-step=38200.ckpt")
+        ckpt_path = "/home/fmarchesoni/segmentation_features/evaluations/FeatUp2/epoch=49-step=19100.ckpt"
+        trainer.validate(evaluator, val_loader, ckpt_path=ckpt_path)
     else:
         trainer.fit(evaluator, train_loader, val_loader)
 

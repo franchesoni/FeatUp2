@@ -49,7 +49,7 @@ class EmbeddingAndImage(Dataset):
         return self.labels.max() + 1
 
     def __getitem__(self, index):
-        return self.feats[index], self.labels[index], self.imgs[index]
+        return self.feats[index], self.labels[index], self.imgs[index]['img']
 
     def __len__(self):
         return len(self.labels)
